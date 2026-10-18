@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Wing Hop — GY Industries</title>
+<meta name="description" content="Wing Hop: tap to flap, glide through the gaps in the forest and climb the GY Industries leaderboard.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{ --cream:#f6f1e6; --cream-2:#efe8d8; --panel:#fffcf6; --ink:#241b12; --dim:#8a7b69; --line:#e3d9c6; --terracotta:#c9713b; --terracotta-dark:#a85a2c; --moss:#6f7a4c; }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ height:100%; background:var(--cream); color:var(--ink); font-family:'Inter',system-ui,sans-serif; -webkit-tap-highlight-color:transparent; touch-action:manipulation; overscroll-behavior:none; user-select:none; -webkit-user-select:none; }
+  body{ display:flex; flex-direction:column; align-items:center; padding:10px 10px 90px; }
+  header{ width:100%; max-width:420px; display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  header a{ color:var(--terracotta-dark); font-weight:600; font-size:13px; text-decoration:none; width:90px; }
+  h1{ font-family:'Fraunces',serif; font-size:24px; font-weight:600; }
+  .stage{ position:relative; width:100%; max-width:420px; flex:0 1 auto; }
+  canvas#game{ width:100%; aspect-ratio:9/16; max-height:calc(100vh - 150px); display:block; border:2px solid var(--ink); border-radius:12px; background:#f3e7d0; touch-action:none; cursor:pointer; margin:0 auto; }
+  .overlay{ position:absolute; inset:0; border-radius:12px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:18px; gap:10px; pointer-events:none; }
+  .overlay[hidden]{ display:none; }
+  .overlay.dim{ background:rgba(36,27,18,.78); color:var(--cream); pointer-events:auto; }
+  .overlay h2{ font-family:'Fraunces',serif; font-size:30px; }
+  .overlay p{ font-size:14px; line-height:1.5; color:rgba(246,241,230,.9); }
+  .overlay .big{ font-family:'Fraunces',serif; font-size:52px; color:#fff; line-height:1; }
+  .ready-hint{ position:absolute; left:0; right:0; top:58%; text-align:center; font-weight:700; font-size:15px; color:var(--ink); pointer-events:none; text-shadow:0 1px 0 rgba(255,255,255,.6); }
+  button.btn{ background:var(--terracotta); color:#fff; border:0; border-radius:999px; padding:12px 28px; font:inherit; font-weight:700; font-size:15px; cursor:pointer; }
+  button.btn:hover{ background:var(--terracotta-dark); }
+  button.btn:disabled{ opacity:.5; cursor:default; }
+  .help{ margin-top:10px; font-size:12px; color:var(--dim); text-align:center; line-height:1.6; max-width:380px; }
+</style>
+</head>
+<body>
+<header>
+  <a href="../">&larr; GY Industries</a>
+  <h1>Wing Hop</h1>
+  <span style="width:90px"></span>
+</header>
+
+<div class="stage">
+  <canvas id="game" width="360" height="640" aria-label="Wing Hop game. Tap, click or press space to flap."></canvas>
+  <div class="ready-hint" id="ready-hint">Tap to flap!</div>
+  <div class="overlay dim" id="ov-over" hidden>
+    <h2>Game over</h2>
+    <div class="big" id="final-score">0</div>
+    <p>Best: <b id="final-best">0</b></p>
+    <p id="save-status"></p>
+    <button class="btn" id="btn-again" disabled>Play again</button>
+  </div>
+  <div class="overlay dim" id="ov-pause" hidden>
+    <h2>Paused</h2>
+    <p>Tap to keep flying</p>
+  </div>
+</div>
+<p class="help">Tap, click or press Space to flap. Fly through the gaps between the tree trunks.<br>Log in with the box in the corner to put your score on the leaderboard.</p>
+
+<script src="../gy-scores.js" data-game="wing-hop"></script>
+<script>
+(function(){
+  'use strict';
+  var W = 360, H = 640, GROUND = 80, FLOOR = H - GROUND;
+  var BIRD_X = 100, R = 15;
+  var GRAV = 1500, FLAP = -430, MAXFALL = 720;
+  var PW = 64, GAP = 165, SPACING = 210, EDGE = 90;
+  var STEP = 1 / 120;
+
+  var cv = document.getElementById('game');
+  var ctx = cv.getContext && cv.getContext('2d');
+  var $ = function(id){ return document.getElementById(id); };
+
+  var mode = 'ready';           // ready | playing | over
+  var paused = false;
+  var bird, pillars, score, distance, acc = 0, last = 0, raf = 0, wing = 0, t = 0, overAt = 0;
+  var best = 0;
+  try { best = parseInt(localStorage.getItem('wh_best') || '0', 10) || 0; } catch(e){}
+
+  function speed(){ return 140 + Math.min(score, 30) * 2.5; }
+  function reset(){
+    bird = { y: 280, vy: 0 };
+    pillars = []; score = 0; distance = 0; wing = 0;
+    mode = 'ready'; paused = false;
+    $('ov-over').hidden = true; $('ov-pause').hidden = true; $('ready-hint').hidden = false;
+    draw();
+  }
+  function addPillar(x){
+    var gapY = EDGE + GAP / 2 + Math.random() * (FLOOR - 2 * EDGE - GAP);
+    pillars.push({ x: x, gapY: gapY, passed: false });
+  }
+  function flap(){
+    if(paused){ paused = false; $('ov-pause').hidden = true; last = performance.now(); return; }
+    if(mode === 'over') return;
+    if(mode === 'ready'){
+      mode = 'playing'; $('ready-hint').hidden = true;
+      addPillar(W + 60); addPillar(W + 60 + SPACING);
+    }
+    bird.vy = FLAP; wing = 1;
+  }
+  function circleHitsRect(cx, cy, rx, ry, rw, rh){
+    var nx = Math.max(rx, Math.min(cx, rx + rw)), ny = Math.max(ry, Math.min(cy, ry + rh));
+    var dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy < R * R;
+  }
+  function hitsPillar(p){
+    return circleHitsRect(BIRD_X, bird.y, p.x, 0, PW, p.gapY - GAP / 2) ||
+           circleHitsRect(BIRD_X, bird.y, p.x, p.gapY + GAP / 2, PW, FLOOR - (p.gapY + GAP / 2));
+  }
+  function step(){
+    t += STEP;
+    if(mode === 'ready'){ bird.y = 280 + Math.sin(t * 5) * 8; return; }
+    if(mode !== 'playing') return;
+    bird.vy = Math.min(MAXFALL, bird.vy + GRAV * STEP);
+    bird.y += bird.vy * STEP;
+    if(bird.y < R){ bird.y = R; if(bird.vy < 0) bird.vy = 0; }
+    var dx = speed() * STEP; distance += dx;
+    for(var i = 0; i < pillars.length; i++) pillars[i].x -= dx;
+    if(pillars.length && pillars[0].x + PW < -10) pillars.shift();
+    var lastP = pillars[pillars.length - 1];
+    if(lastP && lastP.x < W) addPillar(lastP.x + SPACING);
+    for(var j = 0; j < pillars.length; j++){
+      var p = pillars[j];
+      if(!p.passed && p.x + PW < BIRD_X - R){ p.passed = true; score++; }
+      if(hitsPillar(p)){ end(); return; }
+    }
+    if(bird.y + R >= FLOOR){ bird.y = FLOOR - R; end(); }
+  }
+  function end(){
+    mode = 'over';
+    if(score > best){ best = score; try { localStorage.setItem('wh_best', String(best)); } catch(e){} }
+    overAt = performance.now();
+    $('final-score').textContent = score;
+    $('final-best').textContent = best;
+    var btn = $('btn-again'); btn.disabled = true;
+    setTimeout(function(){ btn.disabled = false; }, 600);
+    var st = $('save-status'); st.textContent = '';
+    if(score > 0 && window.GY && typeof window.GY.submitScore === 'function'){
+      st.textContent = 'Saving your score…';
+      window.GY.submitScore(score).then(function(ok){
+        st.textContent = ok ? 'Score saved to the leaderboard!' : 'Log in with the box in the corner to put your score on the leaderboard.';
+      }, function(){ st.textContent = 'Could not save the score this time.'; });
+    } else if(score > 0){
+      st.textContent = 'Log in with the box in the corner to put your score on the leaderboard.';
+    }
+    $('ov-over').hidden = false;
+    draw();
+  }
+
+  /* ---------- drawing ---------- */
+  function trunk(x, y, w, h, capTop){
+    ctx.fillStyle = '#6f7a4c'; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(x + 6, y, 8, h);
+    ctx.fillStyle = 'rgba(36,27,18,.18)'; ctx.fillRect(x + w - 12, y, 12, h);
+    var capH = 22, cy = capTop ? y + h - capH : y;
+    ctx.fillStyle = '#5b6540'; ctx.fillRect(x - 5, cy, w + 10, capH);
+    ctx.fillStyle = 'rgba(255,255,255,.2)'; ctx.fillRect(x - 5, cy, w + 10, 4);
+  }
+  function drawBird(){
+    var tilt = Math.max(-0.5, Math.min(1.1, bird.vy / 600));
+    ctx.save(); ctx.translate(BIRD_X, bird.y); ctx.rotate(mode === 'ready' ? 0 : tilt);
+    ctx.fillStyle = '#c9713b'; ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();   // body
+    ctx.fillStyle = '#f6e3c4'; ctx.beginPath(); ctx.ellipse(2, 5, 9, 7, 0, 0, Math.PI * 2); ctx.fill();   // belly
+    ctx.fillStyle = '#a85a2c';                                                               // ear tufts
+    ctx.beginPath(); ctx.moveTo(-9, -11); ctx.lineTo(-5, -20); ctx.lineTo(-1, -13); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(1, -13); ctx.lineTo(6, -20); ctx.lineTo(10, -10); ctx.fill();
+    var flapUp = wing > 0.4 ? -8 : 4;                                                         // wing
+    ctx.fillStyle = '#a85a2c'; ctx.beginPath(); ctx.ellipse(-6, flapUp, 9, 5, -0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(7, -4, 5.5, 0, Math.PI * 2); ctx.fill();   // eye
+    ctx.fillStyle = '#241b12'; ctx.beginPath(); ctx.arc(8.5, -4, 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#d9a441'; ctx.beginPath(); ctx.moveTo(11, 1); ctx.lineTo(19, 4); ctx.lineTo(11, 7); ctx.fill();   // beak
+    ctx.restore();
+  }
+  function draw(){
+    if(!ctx) return;
+    var g = ctx.createLinearGradient(0, 0, 0, FLOOR);
+    g.addColorStop(0, '#f8efd9'); g.addColorStop(1, '#efd9b5');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // far hills (slow parallax)
+    var off = -(distance * 0.2) % 240;
+    ctx.fillStyle = 'rgba(111,122,76,.28)';
+    for(var hx = off - 240; hx < W + 240; hx += 240){
+      ctx.beginPath(); ctx.moveTo(hx, FLOOR); ctx.quadraticCurveTo(hx + 120, FLOOR - 150, hx + 240, FLOOR); ctx.fill();
+    }
+    var off2 = -(distance * 0.45) % 180;
+    ctx.fillStyle = 'rgba(111,122,76,.38)';
+    for(var hx2 = off2 - 180; hx2 < W + 180; hx2 += 180){
+      ctx.beginPath(); ctx.moveTo(hx2, FLOOR); ctx.quadraticCurveTo(hx2 + 90, FLOOR - 80, hx2 + 180, FLOOR); ctx.fill();
+    }
+    if(pillars) pillars.forEach(function(p){
+      trunk(p.x, 0, PW, p.gapY - GAP / 2, true);
+      trunk(p.x, p.gapY + GAP / 2, PW, FLOOR - (p.gapY + GAP / 2), false);
+    });
+    // ground
+    ctx.fillStyle = '#a85a2c'; ctx.fillRect(0, FLOOR, W, GROUND);
+    ctx.fillStyle = '#c9713b'; ctx.fillRect(0, FLOOR, W, 14);
+    ctx.fillStyle = 'rgba(36,27,18,.15)';
+    var go = -(distance) % 36;
+    for(var sx = go - 36; sx < W + 36; sx += 36){ ctx.beginPath(); ctx.moveTo(sx, FLOOR + 14); ctx.lineTo(sx + 18, FLOOR + 14); ctx.lineTo(sx + 6, FLOOR + GROUND); ctx.lineTo(sx - 12, FLOOR + GROUND); ctx.fill(); }
+    if(bird) drawBird();
+    if(mode !== 'ready' || score > 0){
+      ctx.font = '700 54px Fraunces, serif'; ctx.textAlign = 'center'; ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(36,27,18,.85)';
+      ctx.strokeText(String(score), W / 2, 90); ctx.fillStyle = '#fff'; ctx.fillText(String(score), W / 2, 90);
+    }
+  }
+
+  /* ---------- loop & input ---------- */
+  function frame(now){
+    var dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if(!paused){
+      acc += dt;
+      while(acc >= STEP){ acc -= STEP; step(); if(wing > 0) wing = Math.max(0, wing - STEP * 4); }
+    }
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+  function press(e){ if(e && e.preventDefault) e.preventDefault(); flap(); }
+  cv.addEventListener('pointerdown', press);
+  $('ov-pause').addEventListener('pointerdown', press);
+  document.addEventListener('keydown', function(e){
+    if(e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W'){
+      e.preventDefault();
+      if(mode === 'over'){ if(!$('btn-again').disabled) reset(); return; }
+      flap();
+    }
+  });
+  $('btn-again').addEventListener('click', reset);
+  document.addEventListener('visibilitychange', function(){
+    if(document.hidden && mode === 'playing'){ paused = true; $('ov-pause').hidden = false; }
+  });
+
+  window.WH = {
+    flap: flap, reset: reset, steps: function(n){ for(var i = 0; i < n; i++) step(); },
+    state: function(){ return { mode: mode, bird: bird, pillars: pillars, score: score }; },
+    setBird: function(y, vy){ bird.y = y; bird.vy = vy || 0; },
+    setPillars: function(list){ pillars = list; }, hits: hitsPillar,
+    constants: { W: W, H: H, FLOOR: FLOOR, GAP: GAP, PW: PW, BIRD_X: BIRD_X, R: R }
+  };
+  reset();
+  last = performance.now(); raf = requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
